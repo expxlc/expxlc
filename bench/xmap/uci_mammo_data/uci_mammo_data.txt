@@ -1,0 +1,58 @@
+2
+0 0
+1 1
+13
+0
+13
+0 RoundShape
+2
+0 0
+1 1
+1 OvalShape
+2
+0 0
+1 1
+2 LobularShape
+2
+0 0
+1 1
+3 IrregularShape
+2
+0 0
+1 1
+4 CircumscribedMargin
+2
+0 0
+1 1
+5 MicrolobulatedMargin
+2
+0 0
+1 1
+6 ObscuredMargin
+2
+0 0
+1 1
+7 IllDefinedMargin
+2
+0 0
+1 1
+8 SpiculatedMargin
+2
+0 0
+1 1
+9 Age_lt_30
+2
+0 0
+1 1
+10 Age_geq_45
+2
+0 0
+1 1
+11 Age_geq_60
+2
+0 0
+1 1
+12 Density_geq_2
+2
+0 0
+1 1

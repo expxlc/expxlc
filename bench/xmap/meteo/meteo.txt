@@ -1,0 +1,24 @@
+2
+0 +
+1 -
+4
+0
+4
+0 outlook
+3
+0 overcast
+1 rain
+2 sunny
+1 temperature
+3
+0 cool
+1 hot
+2 mild
+2 humidity
+2
+0 high
+1 normal
+3 windy
+2
+0 false
+1 true

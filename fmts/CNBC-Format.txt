@@ -1,0 +1,23 @@
+nc
+P(C0)
+P(C1)
+...
+P(Cnc)
+N
+d1
+P(e1=1|C0) P(e1=2|C0) ... P(e1=d1|C0)
+P(e1=1|C1) P(e1=2|C1) ... P(e1=d1|C1)
+...
+P(e1=1|Cnc) P(e1=2|Cnc) ... P(e1=d1|Cnc)
+d2
+P(e2=1|C0) P(e2=2|C0) ... P(e2=d2|C0)
+P(e2=1|C1) P(e2=2|C1) ... P(e2=d2|C1)
+...
+P(e2=1|Cnc) P(e2=2|Cnc) ... P(e2=d2|Cnc)
+d3
+...
+dN
+P(eN=1|C0) P(eN=2|C0) ... P(eN=d2|C0)
+P(eN=1|C1) P(eN=2|C1) ... P(eN=d2|C1)
+...
+P(eN=1|Cnc) P(e2=2|Cnc) ... P(e2=d2|Cnc)

@@ -1,0 +1,721 @@
+#!/usr/bin/env perl
+
+## Tool for reasoning about explanations in XLC's. Starting from a
+## XLC and associated instance, the tool can enumerate one or more
+## explanations. The tool can also validate explanations given in a
+## file of explanations. The default mode of operation is to enumerate
+## all explanations.
+## One example of an ML model that can be reduced to XLC is the NBC.
+## The details of the algorithm are included in the accompanying paper.
+## The script specifically assumes classification problems with *two*
+## classes. The handling of multiple classes is beyond the scope of
+## the work.
+
+## To run the tool:
+## <script-name> [-h] [-d] [-v] [-C] [-t] [-s] [-w] [-x] [-k <KKK>] [-n <NNN>] [-p <prt-file>] [-c <xpl-file> [-r]] [-m <xmap-file] -i <cat-inst-file> -f <xlc-file>
+
+push @INC, \&resolve_inc;
+
+use strict;
+use warnings;
+
+use Getopt::Std;
+use List::Util qw(sum0); ##qw( max min sum sum0);
+
+use constant DBG => 0;   ## Also, comment out unused 'uses'
+use constant CHK => 0;
+
+require Parsers;
+import Parsers qw( parse_xlc parse_instance parse_explanations parse_xmap );
+
+# 0. Read command line arguments
+my %opts = ();
+&read_opts(\%opts);
+
+if ((CHK || DBG) && (defined($opts{k}) || defined($opts{d}))) {
+    ## Uncomment to use assertions && debug messages
+    #use Carp::Assert; # Assertions are on.
+    #if (DBG && $opts{d}) {
+    #    use Data::Dumper;
+    #}
+}
+if (defined($opts{p})) {
+    open ($opts{FH}, '>', $opts{p});
+    select($opts{FH});
+}
+
+
+# 1a. Data structures
+my %xlc = ();
+my %xmap = ();
+my %inst = ();
+my %xpl = ();
+
+# 1b. Prepare interrupts
+if ($opts{C}) {    # If catching system signals
+    &Utils::register_handlers();
+    &Utils::push_arg(\%opts);
+    &Utils::push_arg(\%xlc);
+    if ($opts{t}) { &Utils::push_callback(\&print_stats_int); }
+    if ($opts{s}) { &Utils::push_callback(\&print_summaries_int); }
+}
+
+# 2. Parse NBC XLC
+&parse_xlc(\%opts, \%xlc, $opts{f});
+if (DBG && $opts{d}) { print Data::Dumper->Dump([ \%xlc ], [ qw(xlc) ]); }
+if (CHK && $xlc{NReal}!=0) { die "Unable to handle real-valued features.\n"; }
+
+# 3. Parse instance
+&parse_instance(\%opts, \%inst, $opts{i});
+if (DBG && $opts{d}) { print Data::Dumper->Dump([ \%inst ], [ qw(inst) ]); }
+
+# 4. If map specified, load map
+if (defined($opts{m})) {
+    &parse_xmap(\%opts, \%xmap, $opts{m});
+} else {
+    &set_def_xmap(\%opts, \%xmap, \%xlc);
+}
+if (DBG && $opts{d}) { print Data::Dumper->Dump([ \%xmap ], [ qw(xmap) ]); }
+
+# 5. Compute XLC values & preprocess XLC
+&simulate_xlc(\%opts, \%xlc, \%inst);
+&preprocess_xlc(\%opts, \%xlc, \%inst);
+&initialize_data(\%opts, \%xlc, \%inst, \%xmap);
+
+# 6. If *check* mode: read & validate one or more explanations
+if ($opts{c}) {
+    &parse_explanations($opts{c}, \%xpl);
+    &validate_explanations(\%opts, \%xlc, \%inst, \%xmap, \%xpl);
+    &print_xpl_status(\%opts, \%xpl);
+    exit();
+}
+
+# 7. Else, compute & report explanations
+if ($opts{x}) {
+    &compute_explanations_xl(\%opts, \%xlc, \%inst);
+}
+else {
+    &compute_explanations(\%opts, \%xlc, \%inst);
+}
+
+# 8. Print summaries & stats
+if ($opts{s}) { &print_summaries(\%opts, \%xlc); }
+if ($opts{t}) { &print_stats(\%opts, \%xlc); }
+
+1;
+
+# Simulate XLC
+sub simulate_xlc()
+{
+    my ($opts, $xlc, $inst) = @_;
+
+    # Start with the intercept W0
+    my $simval = $xlc->{W0};
+
+    # Add the contribution of real-value variables (currently assumed to be 0)
+    # ...
+    if (CHK && $xlc->{NReal} > 0) {
+        die "Simulation of real-valued features no ready yet.\n"; } 
+    # ...
+
+    # Add the contribution of categorical variables
+    for (my $i=0; $i<$xlc->{NCat}; ++$i) {
+        my $cvi = "CVs$i";
+        $simval += ${$xlc->{$cvi}}[${$inst->{E}}[$i]];
+    }
+    $xlc->{C} = ($simval > 0) ? 0 : 1;
+    $xlc->{Gamma} = abs($simval);
+
+    # Validate results
+    if (CHK && defined($opts->{k})) {
+        assert($xlc->{C} == $inst->{C}, 'simulated prediction differs'); }
+    if ($xlc->{C} == 1) { &complement_parameters($opts, $xlc, $inst); }
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_sim)]); }
+}
+
+# If class is 1, then complement all values
+sub complement_parameters()
+{
+    my ($opts, $xlc, $inst) = @_;
+
+    $xlc->{W0} = -$xlc->{W0};
+    for(my $i=0; $i<$xlc->{NReal}; ++$i) {
+        ${$xlc->{RVs}}[$i] = -${$xlc->{RVs}}[$i];
+    }
+    for(my $i=0; $i<$xlc->{NCat}; ++$i) {
+        my $cvi = "CVs$i";
+        for(my $j=0; $j<${$xlc->{CDs}}[$i]; ++$j) {
+            ${$xlc->{$cvi}}[$j] = -${$xlc->{$cvi}}[$j];
+        }
+    }
+    $xlc->{C} = 1 - $xlc->{C};
+
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_cps)]); }
+}
+
+# Preprocess XLC
+sub preprocess_xlc()
+{
+    my ($opts, $xlc, $inst) = @_;
+    # Compute delta's, Delta and Phi [$xlc->{Delta}, $xlc->{DeltaSum}]
+    &compute_deltas($opts, $xlc, $inst); 
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_Ds)]); }
+    #
+    # Sort delta's by non-increasing value [$xlc->{SortedDelta}]
+    &reorder_deltas($opts, $xlc, $inst);
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_Sort)]); }
+    #
+    &calc_partial_sums($opts, $xlc);
+}
+
+sub compute_deltas()
+{
+    my ($opts, $xlc, $inst) = @_;
+
+    # a. For each feature, sort weights, and pick smallest
+    my $sumdelta = 0;
+    for (my $i=0; $i<$xlc->{NCat}; ++$i) {
+        my $cvi = "CVs$i";
+        my $tval = ${$xlc->{$cvi}}[${$inst->{E}}[$i]];
+        my @scvs = sort { $a <=> $b} @{$xlc->{$cvi}};
+        ${$xlc->{Delta}}[$i] = $tval - $scvs[0];
+        ##print ("i=$i: tval=$tval vs. minv=$scvs[0] vs. delta=${$xlc->{Delta}}[$i]\n");
+        $sumdelta += ${$xlc->{Delta}}[$i];
+    }
+    $xlc->{DeltaSum} = $sumdelta;
+    $xlc->{Phi} = $xlc->{DeltaSum} - $xlc->{Gamma};
+    $xlc->{PhiRef} = $xlc->{Phi};
+
+    # b. Validations
+    if (DBG && $opts->{d}) { print "SumDelta: $sumdelta\n"; }
+    if (CHK && defined($opts->{k}) && $sumdelta <= $xlc->{Phi}) {
+        my $msg = 'XLC prediction cannot be changed!?';
+        if ($opts->{k}>1)     { &prt_err_exit($msg); }
+        elsif ($opts->{k}==1) { &prt_warn($msg); }
+    }
+}
+
+sub reorder_deltas()
+{
+    my ($opts, $xlc, $inst) = @_;
+
+    my %DMap = ();
+    $xlc->{DeltaMap} = {};
+    for(my $i=0; $i<$xlc->{NCat}; ++$i) {
+        my $rval = ${$xlc->{Delta}}[$i];
+        push @{$xlc->{DeltaMap}->{$rval}}, $i;
+        $DMap{$rval} = 1;
+    }
+    @{$xlc->{SortedDelta}} = sort { $b <=> $a } @{$xlc->{Delta}};
+    @{$xlc->{SDelta}} = ();
+    for(my $i=0; $i<=$#{$xlc->{SortedDelta}}; ++$i) {
+        my $rval = ${$xlc->{SortedDelta}}[$i];
+        if ($DMap{$rval} == 0) { next; }
+        if (DBG && $opts->{d}) {
+            print "A: SDelta \@ i=$i: @{$xlc->{SDelta}} && rval=$rval\n"; }
+        push @{$xlc->{SDelta}}, @{$xlc->{DeltaMap}->{$rval}};
+        $DMap{$rval} = 0;
+    }
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_Reord)]); }
+    if (CHK && defined($opts->{k})) {
+        my ($sdz, $dz) = ($#{$xlc->{SDelta}}+1, $#{$xlc->{Delta}}+1);
+        assert($sdz == $dz, "Different sizes: $sdz vs. $dz"); }
+}
+
+sub calc_partial_sums()
+{
+    my ($opts, $xlc) = @_;
+
+    my ($depth, $tmpv) = ($xlc->{NCat}-1, 0);
+    while($depth>=0) {
+        $tmpv += ${$xlc->{SortedDelta}}[$depth];
+        $xlc->{SumFrom}[$depth--] = $tmpv;
+    }
+}
+
+sub set_def_xmap()
+{
+    my ($opts, $xmap, $xlc) = @_;
+
+    $xmap->{NC} = 2;    # Default number of classes...
+    @{$xmap->{ClMap}} = ('0', '1');
+    $xmap->{NC} = $xlc->{NV};
+    $xmap->{NReal} = $xlc->{NReal};
+    for (my $i=0; $i<$xlc->{NReal}; ++$i) {
+        ${$xmap->{VMap}}[$i] = "v$i";
+    }
+    $xmap->{NCat} = $xlc->{NCat};
+    @{$xmap->{CDs}} = @{$xlc->{CDs}};
+    for (my $i=0; $i<$xlc->{NCat}; ++$i) {
+        my $cid = $xmap->{NReal}+$i;
+        ${$xmap->{VMap}}[$i] = "v$cid";
+        for (my $j=0; $j<${$xlc->{CDs}}[$i]; ++$j) {
+            ${$xmap->{CMap}->{$i}}[$j] = "$j";
+        }
+    }
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xmap],[qw(xmap_def)]); }
+}
+
+sub initialize_data()
+{
+    my ($opts, $xlc, $inst, $xmap) = @_;
+
+    ($xlc->{XplNum}, $xlc->{XplSz}) = (0, 0);
+    ($xlc->{XplMin}, $xlc->{XplMax}) = ($xlc->{NV}, 0);
+    for(my $idx=0; $idx<=$xlc->{NV}; ++$idx) {
+        ${$xlc->{CNTS}}[$idx] = 0;
+    }
+    for(my $idx=0; $idx<$xlc->{NReal}; ++$idx) {
+        die "Handling of real-valued features not yet implemented...\n";
+    }
+    for(my $idx=0; $idx<$xlc->{NCat}; ++$idx) {
+        # Categorical feature name
+        my $cval = ${$inst->{E}}[$idx];
+        my $vname = ${$xmap->{VMap}}[$xmap->{NReal}+$idx];
+        my $cname = ${$xmap->{CMap}->{$idx}}[$cval];
+        ${$xlc->{LITS}}[$idx] = "$vname=$cname";
+    }
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_init)]); }
+}
+
+
+# Reference implementation
+sub compute_explanations()
+{
+    my ($opts, $xlc, $inst) = @_;
+
+    ##if ($xlc->{Lambda} < 0) { print ("Expl: true\n"); return; } ????
+    #
+    my @xp = (-1) x ($xlc->{NV}+1); my @tog = (-1) x $xlc->{NV}; my $depth=-1; 
+    my $cntxp = (defined($opts->{n})) ? 1 : 0; my $numxp = 0; $xp[0] = 1;
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_xpA)]); }
+    while (1) {
+        # 1. Find another explanation
+        #if (DBG && $opts->{d}) { print("\@Depth: $depth\n");
+        #    &prt_xp_snapshot($xlc,\%xp,\@tog,$depth,1); }
+        $depth = &find_one_explanation($opts, $xlc, $inst, \@tog, \@xp, $depth);
+        &report_explanation($opts, $xlc, \@xp);
+        if ($cntxp && ++$numxp == $opts->{n}) { last; }
+        # 2. Enter consistent state
+        $depth = &enter_valid_state($opts, $xlc, $inst, \@tog, \@xp, $depth);
+        if ($depth < 0) { return; }
+        if (DBG && $opts->{d}) { &prt_xp_snapshot($xlc,\@xp,\@tog,$depth,0); }
+    }
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_xpB) ]); }
+}
+
+sub find_one_explanation()
+{
+    my ($opts, $xlc, $inst, $tog, $xp, $idx) = @_;
+
+    while ($xlc->{Phi} >= 0) {
+        if (DBG && defined($opts->{d})) { print "Depth(down): $idx\n"; }
+        if (CHK && defined($opts->{k})) {
+            assert($idx<$xlc->{NV});
+            assert($idx==$xlc->{NV}-1 || ${$tog}[$idx+1]==-1); }
+        ${$tog}[++$idx] = 0;
+        $xlc->{Phi} -= ${$xlc->{SortedDelta}}[$idx];
+        &reg_literal($opts, $xp, $xlc, $inst, $idx);
+        if (DBG && $opts->{d}) { &prt_xp_snapshot($xlc, $xp, $tog, $idx, 0); }
+    }
+    if (CHK && defined($opts->{k})) {
+        assert($xlc->{Phi}<0); &chk_explanation($opts, $xlc, $xp, $tog); }
+    return $idx;
+}
+
+sub enter_valid_state()
+{
+    my ($opts, $xlc, $inst, $tog, $xp, $idx) = @_;
+
+    while (!&consistent_state($opts, $xlc, $idx)) {
+        if (DBG && defined($opts->{d})) { print "Depth(up): $idx\n"; }
+        while ($idx>=0 && ${$tog}[$idx]==1) { ${$tog}[$idx--] = -1; }
+        if ($idx < 0) { return $idx; }  # Terminate
+        # Drop literal from explanation
+        if (CHK && defined($opts->{k})) { assert(${$tog}[$idx]==0); }
+        &unreg_literal($opts, $xp, $xlc, $inst, $idx);
+        $xlc->{Phi} += ${$xlc->{SortedDelta}}[$idx];
+        if (CHK && defined($opts->{k})) { assert(${$tog}[$idx]==0); }
+        ${$tog}[$idx] = 1;
+        if (DBG && $opts->{d}) { &prt_xp_snapshot($xlc, $xp, $tog, $idx, 1); }
+    }
+    return $idx;
+}
+
+sub consistent_state()
+{
+    my ($opts, $xlc, $idx) = @_;
+
+    my $stok =
+        ($xlc->{Phi} < 0 || $idx == $xlc->{NV}-1 ||
+         ${$xlc->{SumFrom}}[$idx+1] <= $xlc->{Phi});
+    return ($stok) ? 0 : 1;
+}
+
+sub reg_literal()
+{
+    my ($opts, $xp, $xlc, $inst, $idx) = @_;
+    my $lit = ${$xlc->{SDelta}}[$idx];
+    if (CHK) { assert(${$xp}[0] <= $#{$xp}, "XP idx above limit??"); }
+    ${$xp}[${$xp}[0]++] = $lit;
+    if (CHK) { assert(${$xp}[${$xp}[0]] == -1, "Pointing to wrong pos!?"); }
+}
+
+sub unreg_literal()
+{
+    my ($opts, $xp, $xlc, $inst, $idx) = @_;
+    if (CHK) { assert(${$xp}[0] > 0, "XP idx below limit??"); }
+    ${$xp}[--${$xp}[0]] = -1;
+    if (CHK) { assert(${$xp}[${$xp}[0]] == -1, "Pointing to wrong pos!?"); }
+}
+
+sub report_explanation()
+{
+    my ($opts, $xlc, $xp) = @_;
+
+    # Obs: No actual need to sort; we can keep a sorted list. This is faster...
+    if ($opts->{w}) {
+        ##$" = ', ';
+        my $tlits = $xlc->{LITS};
+        my @slice = @{$xp}[1 .. (${$xp}[0]-1)];
+        if (DBG && $opts->{d}) { print ("Slice: @slice\n"); }
+        my @sslice = sort { ${$tlits}[$a] cmp ${$tlits}[$b] } @slice;
+        if (DBG && $opts->{d}) { print ("Sorted Slice: @slice\n"); }
+        my @xplits = map { ${$xlc->{LITS}}[$_] } @sslice;
+        if (DBG && $opts->{d}) { print ("Exp Lits: @xplits\n"); }
+
+        if (CHK && $opts->{k}) {
+            for(my $i=1; $i<=$#xplits; ++$i) {
+                assert($xplits[$i-1] ne $xplits[$i],
+                       "Duplicate literals in explanation: $xplits[$i-1] vs. $xplits[$i]\n" .
+                       "Exp: @xplits\n");
+            }
+        }
+        
+        #my @xplits = sort {abs($a) <=> abs($b)} keys %{$xp};
+        if (!$opts->{v}) {
+            ##local $"=', ';
+            print("Expl: @xplits\n");
+        }
+        else {
+            my $sz = sprintf("_(\#%d/%d", $#xplits+1,$xlc->{NV});
+            my $wt = (defined($opts->{k})) ?
+                sprintf(";W:%3.2f)", $xlc->{Phi}) : ')';
+            ##{ ##local $"=', ';
+            print("Expl$sz$wt: @xplits\n");
+            ## }
+        }
+    }
+    if ($opts->{t} || $opts->{s}) {
+        if ($opts->{t}) {
+            my $nlits = ${$xp}[0]-1;
+            $xlc->{XplSz} += $nlits;
+            if ($xlc->{XplMin} > $nlits) { $xlc->{XplMin} = $nlits; }
+            if ($xlc->{XplMax} < $nlits) { $xlc->{XplMax} = $nlits; }
+        }
+        if ($opts->{s}) {
+            my ($Cnts, $num) = ($xlc->{CNTS}, $xp->[0]);
+            for (my $idx=1; $idx<$num; ++$idx) {
+                ${$Cnts}[$xp->[$idx]]++;
+            }
+        }
+        $xlc->{XplNum}++;
+    }
+    if (DBG && $opts->{d}) { &prt_flush(); }
+}
+
+sub prt_xp_snapshot()
+{
+    my ($xlc, $xp, $tog, $depth, $mf) = @_;
+
+    my $msg = ($mf) ? '@Up:' : '@Down:';
+    print ("$msg\n");
+    print ("Phi:      $xlc->{Phi}\n");
+    print ("Deltas:   [ @{$xlc->{SortedDelta}} ]\n");
+    print ("SDelta:   [ @{$xlc->{SDelta}} ]\n");
+    print ("CNTS:     [ @{$xlc->{CNTS}} ]\n");
+    print ("LITS:     [ @{$xlc->{LITS}} ]\n");
+    my $lstidx = ${$xp}[0]-1;
+    print ("XP keys:  ${$xp}[0] + [ @{$xp}[1..$lstidx] ]\n");
+    print ("XP vect:  [ @{$xp} ]\n");
+    print ("Togs:     [ @{$tog} ]\n");
+    print ("Depth:    $depth\n");
+    &prt_flush();
+}
+
+sub chk_explanation()
+{
+    my ($opts, $xlc, $xp, $tog) = @_;
+
+    my ($phi, $ntogs) = ($xlc->{PhiRef}, 0);
+    for(my $i=0; $i<=$#{$tog}; ++$i) {
+        if (${$tog}[$i]==0) {
+            $phi -= ${$xlc->{SortedDelta}}[$i];
+            $ntogs++;
+        }
+    }
+    assert($phi < 0);
+    assert($ntogs == ${$xp}[0]-1);
+}
+
+
+# Alternative (faster) implementation
+sub compute_explanations_xl()
+{
+    my ($opts, $xlc, $inst) = @_;
+
+    my @SortedDelta = @{$xlc->{SortedDelta}};
+    my @SDelta = @{$xlc->{SDelta}};
+    my @SumFrom = @{$xlc->{SumFrom}};
+    my @xp = (-1) x ($xlc->{NV}+1); my @tog = (-1) x $xlc->{NV}; my $depth=-1; 
+    my $cntxp = (defined($opts->{n})) ? 1 : 0; my $numxp = 0; $xp[0]=1;
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_xpA)]); }
+    while (1) {
+        # 1. Find another explanation
+        while ($xlc->{Phi} >= 0) {
+            if (DBG && defined($opts->{d})) { print "Depth(down): $depth\n"; }
+            if (CHK && defined($opts->{k})) {
+                assert($depth<$xlc->{NV});
+                assert($depth==$xlc->{NV}-1 || $tog[$depth+1]==-1); }
+            $tog[++$depth] = 0;
+            $xlc->{Phi} -= $SortedDelta[$depth];
+            $xp[$xp[0]++] = $SDelta[$depth];
+            if (DBG && $opts->{d}) {
+                &prt_xp_snapshot($xlc,\@xp,\@tog,$depth,0); }
+        }
+        if (CHK && defined($opts->{k})) {
+            assert($xlc->{Phi}<0); &chk_explanation($opts,$xlc,\@xp,\@tog); }
+        &report_explanation($opts, $xlc, \@xp);
+        if ($cntxp && ++$numxp == $opts->{n}) { last; }
+
+        # 2. Enter consistent state
+        while ($xlc->{Phi} < 0 || $depth == $xlc->{NV}-1 ||
+               $SumFrom[$depth+1] <= $xlc->{Phi}) {
+            if (DBG && defined($opts->{d})) { print "Depth(up): $depth\n"; }
+            while ($depth>=0 && $tog[$depth]==1) { $tog[$depth--] = -1; }
+            if ($depth < 0) { return $depth; }  # Terminate
+            # Drop literal from explanation
+            if (CHK && defined($opts->{k})) { assert($tog[$depth]==0); }
+            $xp[--$xp[0]] = 0;
+            $xlc->{Phi} += $SortedDelta[$depth];
+            if (CHK && defined($opts->{k})) { assert($tog[$depth]==0); }
+            $tog[$depth] = 1;
+            if (DBG && $opts->{d}) {
+                &prt_xp_snapshot($xlc,\@xp,\@tog,$depth,1); }
+        }
+        if ($depth < 0) { return; }
+        if (DBG && $opts->{d}) { &prt_xp_snapshot($xlc,\@xp,\@tog,$depth,0); }
+    }
+    if (DBG && $opts->{d}) { print Data::Dumper->Dump([$xlc], [qw(xlc_xpB) ]); }
+}
+
+sub validate_explanations()
+{
+    my ($opts, $xlc, $inst, $xmap, $xpl) = @_;
+
+    %{$xmap->{IVMap}} = ();
+    for (my $i=0; $i<=$#{$xmap->{VMap}}; ++$i) {
+        $xmap->{IVMap}->{${$xmap->{VMap}}[$i]} = $i;
+    }
+    # Traverse & validate given explanations
+    ($xpl->{XPStr}, $xpl->{Status}, $xpl->{RedLits}) = ([], [], []);
+    foreach my $xpvec (@{$xpl->{Expl}}) {
+        push @{$xpl->{XPStr}}, "@{$xpvec}";
+        # 1. Check entailment
+        my $phi = $xlc->{PhiRef};
+        foreach my $lit (@{$xpvec}) {
+            $lit =~ m/([^=]+)=([^=]+)/ || die "Unable to match literal: $lit\n";
+            my ($svar, $sval) = ($1, $2);
+            ##print ("(svar,sval)=($svar,$sval)\n");
+            ##print ("IVMap{svar}: $xmap->{IVMap}->{$svar}\n");
+            my $var = $xmap->{IVMap}->{$svar}-$xmap->{NReal};
+            $phi -= ${$xlc->{Delta}}[$var];
+            ##print ("Current Phi:$phi\n");
+        }
+        if ($phi >= 0) {
+            push @{$xpl->{Status}}, -1;
+            push @{$xpl->{RedLits}}, [];
+            next;
+        }
+        # 2. Check redundancy
+        if (CHK && defined($opts->{k})) { assert($phi < 0); }
+        my $RedLits = [];
+        foreach my $lit (@{$xpvec}) {
+            $lit =~ m/([^=]+)=([^=]+)/ || die "Unable to match literal: $lit\n";
+            my ($svar, $sval) = ($1, $2);
+            my $var = $xmap->{IVMap}->{$svar}-$xmap->{NReal};
+            if ($phi + $xlc->{Delta}[$var] < 0) { push @{$RedLits}, $lit; }
+        }
+        push @{$xpl->{RedLits}}, $RedLits;
+        if (@{$RedLits}) { push @{$xpl->{Status}}, 1; next; }
+        push @{$xpl->{Status}}, 0;
+    }
+    return;
+}
+
+sub print_xpl_status()
+{
+    my ($opts, $xpl) = @_;
+
+    ###($xpl->{XPStr}, $xpl->{Status}, $xpl->{RedLits}) = ([], [], []);
+    for(my $i=0; $i<=$#{$xpl->{XPStr}}; ++$i) {
+        print ("Expl: ${$xpl->{XPStr}}[$i]    =>    ");
+        my $xpst = ${$xpl->{Status}}[$i];
+        my ($msg, $redlits) = ('', '');
+        if ($xpst == 0) {
+            $msg = 'Confirmed as (subset-minimal) explanation';
+        }
+        elsif ($xpst < 0) {
+            $msg = 'NOT an explanation, i.e. entailment does not hold';
+        }
+        else {
+            $msg = 'Redundant explanation. Example of redundant literals: ';
+            $redlits = "@{${$xpl->{RedLits}}[$i]}";
+        }
+        print ("$msg$redlits\n");
+    }
+}
+
+sub print_stats()
+{
+    my ($opts, $xlc) = @_;
+
+    my $tname = uc(&toolname($0));
+    print "\n$tname stats:\n";
+    my $tsz = (defined($opts->{n})) ? "$opts->{n}" : 'all';
+    print ("Target explanations:      $tsz\n");
+    my $avgsz = sprintf("%.2f", $xlc->{XplSz} / $xlc->{XplNum});
+    print ("Number of explanations:   $xlc->{XplNum}\n");
+    print ("Average explanation size: $avgsz\n");
+    print ("Smallest explanation:     $xlc->{XplMin}\n");
+    print ("Largest explanation:      $xlc->{XplMax}\n");
+}
+
+sub print_summaries()
+{
+    my ($opts, $xlc) = @_;
+
+    my $tname = uc(&toolname($0));
+    print "\n$tname summary:\n";
+    my $hsz = 0;
+    for (my $idx=0; $idx <= $#{$xlc->{CNTS}}; ++$idx) {
+        if (${$xlc->{CNTS}}[$idx] != 0) { $hsz++; }
+    }
+    my $tsz = (defined($opts->{n})) ? "$opts->{n}" : 'all';
+    print "Target explanations:      $tsz\n";
+    my $avgsz = sprintf("%.2f", $xlc->{XplSz} / $xlc->{XplNum});
+    print "Number of explanations:   $xlc->{XplNum}\n";
+    print "Histogram size: $hsz\n";
+    print "Literal distribution in explanations:\n";
+    my $tcnts = $xlc->{CNTS};
+    my @skeys = (0 .. $xlc->{NV}-1);
+    @skeys = sort { abs(${$tcnts}[$a]) <=> abs(${$tcnts}[$b]) } @skeys;
+    foreach my $key (@skeys) {
+        next if ${$xlc->{CNTS}}[$key] <= 0;
+        my $lit = ${$xlc->{LITS}}[$key];
+        print("$lit: ${$xlc->{CNTS}}[$key]\n");
+    }
+}
+
+sub print_stats_int()
+{
+    my $args = shift @_;
+
+    my ($opts, $xlc) = @{$args};
+    &print_stats($opts, $xlc);
+}
+
+sub print_summaries_int()
+{
+    my $args = shift @_;
+
+    my ($opts, $xlc) = @{$args};
+    &print_summaries($opts, $xlc);
+}
+
+
+# Utilities
+
+sub read_opts()
+{
+    my ($opts) = @_;
+    getopts("hdvCtswxk:n:c:rp:m:f:i:", $opts);
+
+    if ($opts->{h}) {
+        &prt_help();
+    }
+    elsif (!defined($opts->{f}) || !defined($opts->{i})) {
+        ##||
+        ##(defined($opts->{c}) && defined($opts->{i})) ||
+        ##(!defined($opts->{c}) && !defined($opts->{i}))) {
+        die "Usage: $0 [-h] [-d] [-v] [-C] [-t] [-s] [-w] [-x] [-k <KKK>] [-n <NNN>] [-p <prt-file>] [-c <chk-xpl> [-r]] [-m <xmap-file>] -i <cat-inst-file> -f <xlc-file>\n" ;
+    }
+}
+
+sub prt_help()
+{
+    my $tname = &toolname($0);
+    print <<"EOF";
+$tname: Compute explanations of XLCs (including NBCs) with polynomial delay
+Usage:  $tname [-h] [-d] [-v] [-C] [-t] [-s] [-w] [-x] [-k <KKK>] [-n <NNN>] [-p <prt-file>] [-c <xpl-file> [-r]] [-m <xmap-file>] -i <cat-inst-file> -f <xlc-file>
+     -f <xlc-file>  specification of XLC file
+     -i <inst-file> specification of instance
+     -c <xpl-file>  check/validate explanation 
+     -m <xmap-file> map file
+     -p <prt-file>  print to file
+     -n <NNN>       number of NNN explanations to list (the default is all)
+     -k <KKK>       apply consistency checks & issue warnings (1) or exit (>1)
+     -r             repair explanations (when validating explanations) [not yet available]
+     -x             run faster implementation
+     -w             write computed explanations
+     -s             summarize computed explanations
+     -t             gather stats on computed explanations
+     -C             enable catching system signals
+     -v             verbose mode
+     -d             debug mode
+     -h             prints this help
+    Author:   authors\@some.inst
+EOF
+    exit();
+}
+
+sub prt_warn()
+{
+    my ($msg) = @_;
+    print("*** $0 warning ***: $msg\n");
+}
+
+sub prt_err_exit()
+{
+    my ($msg) = @_;
+    print("*** $0 error ***: $msg\n");
+    exit();
+}
+
+sub toolname()
+{
+    my ($tname) = @_;
+    $tname =~ m/([\.\_\-a-zA-Z0-9]+)$/;
+    return $1;
+}
+
+sub prt_flush()
+{
+    select()->flush();
+}
+
+
+#------------------------------------------------------------------------------#
+# Auxiliary functions
+#------------------------------------------------------------------------------#
+
+sub resolve_inc() {    # Copy from template kept in UTILS package
+    my ($cref, $pmname) = @_;
+    my @progname_toks = split(/\//, $0);
+    pop @progname_toks;
+    my $progpath = join('/', @progname_toks);
+    my $fullname = $progpath . '/' . $pmname;
+    open(my $fh, "<$fullname") || die "non-existing file: $pmname\n";
+    return $fh;
+}
+

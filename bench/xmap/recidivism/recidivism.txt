@@ -1,0 +1,75 @@
+2
+0 No more crimes
+1 Re-arrested
+15
+0
+15
+0 Race
+2
+0 Black
+1 White
+1 Alcohol
+2
+0 No
+1 Yes
+2 Junky
+2
+0 No
+1 Yes
+3 Supervised Release
+2
+0 No
+1 Yes
+4 Married
+2
+0 Married
+1 No
+5 Felony
+2
+0 No
+1 Yes
+6 WorkRelease
+2
+0 No
+1 Yes
+7 Crime against Property
+2
+0 No
+1 Yes
+8 Crime against Person
+2
+0 No
+1 Yes
+9 Gender
+2
+0 Female
+1 Male
+10 Priors
+4
+0 1 to 5
+1 More than 5
+2 NO
+3 UNKNOWN
+11 YearsSchool
+4
+0 10.00 < YearsSchool <= 11.00
+1 8.00 < YearsSchool <= 10.00
+2 YearsSchool <= 8.00
+3 YearsSchool > 11.00
+12 PrisonViolations
+3
+0 1 to 5
+1 More than 5
+2 NO
+13 Age
+4
+0 21.00 < Age <= 26.00
+1 26.00 < Age <= 33.00
+2 Age <= 21.00
+3 Age > 33.00
+14 MonthsServed
+4
+0 4.00 < MonthsServed <= 9.00
+1 9.00 < MonthsServed <= 24.00
+2 MonthsServed <= 4.00
+3 MonthsServed > 24.00

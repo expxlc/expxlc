@@ -1,0 +1,12 @@
+N
+w_0
+nr
+w_1
+w_2
+...
+w_{nr}
+nc
+d1 v11 v12 ... v1d1
+d2 v21 v22 ... v2d2
+...
+dnc vnc1 nvc2 ... vncdnc
