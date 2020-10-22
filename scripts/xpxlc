@@ -674,7 +674,7 @@ Usage:  $tname [-h] [-d] [-v] [-C] [-t] [-s] [-w] [-x] [-k <KKK>] [-n <NNN>] [-p
      -v             verbose mode
      -d             debug mode
      -h             prints this help
-    Author:   authors\@some.inst
+    Author:   joao.marques-silva\@univ-toulouse.fr
 EOF
     exit();
 }
@@ -719,3 +719,4 @@ sub resolve_inc() {    # Copy from template kept in UTILS package
     return $fh;
 }
 
+# jpms
