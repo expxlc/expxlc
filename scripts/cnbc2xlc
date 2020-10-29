@@ -1,0 +1,247 @@
+#!/usr/bin/env perl
+
+## Tool for translating the probabilities of an CNBC into a
+## sequence of non-negative weights which are then represented
+## in the XLC format.
+## Script specifically assumes *2* classes
+
+push @INC, \&resolve_inc;
+
+use strict;
+use warnings;
+use Data::Dumper;
+use Getopt::Std;
+
+require Parsers;
+import Parsers qw( parse_cnbc );
+
+require Writers;
+import Writers qw( write_xlc );
+
+use constant DBG => 0;   ## Also, comment out unused 'uses'
+use constant CHK => 0;
+
+my $f_err_msg = "Please check file name, existence, permissions, etc.\n";
+
+# 0. Read command line arguments
+my %opts = ();
+&read_opts(\%opts);
+
+
+if ((CHK || DBG) && (defined($opts{k}) || defined($opts{d}))) {
+    ## Uncomment to use assertions && debug messages
+    #use Carp::Assert; # Assertions are on.
+    #if (DBG && $opts{d}) {
+    #    use Data::Dumper;
+    #}
+}
+if (defined($opts{o})) {
+    open ($opts{FH}, '>', $opts{o});
+    select($opts{FH});
+}
+
+
+# 1. Data structures
+my %cnbc = ();
+my %xlc = ();
+my $mval = 0;
+my $tval = 0;
+
+# 2. Read ML model (definition of (C)NBC in CNBC format)
+&parse_cnbc(\%opts, \%cnbc, $opts{f});
+if ($opts{d}) { warn Data::Dumper->Dump([ \%cnbc ], [ qw(cnbc) ]); }
+
+# 3. Translate CNBC weights (i.e. probs) into CNBC weights (i.e. additive & >=0)
+&process_weights(\%opts, \%cnbc);
+if ($opts{d}) { warn Data::Dumper->Dump([ \%cnbc ], [ qw(cnbc) ]); }
+
+#4. Reduce CNBC (w/ weights) into XLC
+&reduce_cnbc_xlc(\%opts, \%cnbc, \%xlc);
+if ($opts{d}) { warn Data::Dumper->Dump([ \%xlc ], [ qw(xlc) ]); }
+
+# 4. Print ML model in ACC format
+&write_xlc(\%opts, \%xlc);
+
+1;
+
+
+# Core functions
+
+# Goal is to apply a translation to the prob values
+sub process_weights()
+{
+    my ($opts, $cnbc) = @_;
+    if (CHK && $opts->{k}) {
+        assert($cnbc->{NC}==2, "Cannot handle $cnbc->{NC} classes\n");
+    }
+
+    # 1. First traversal: compute & sum logarithms and flag 0 probs
+    my ($hasp0, $sumlogs, $minv, $logv) = (0, 0, 0, 0);
+    for(my $i=0; $i<=$#{$cnbc->{Prior}}; ++$i) {
+        if (${$cnbc->{Prior}}[$i] == 0) { $hasp0 = 1; }
+        else {
+            $logv = log(${$cnbc->{Prior}}[$i]);
+            $sumlogs += $logv;
+            ${$cnbc->{Prior}}[$i] = $logv;
+            if ($logv < $minv) { $minv = $logv; }
+        }
+    }
+    for(my $j=0; $j<$cnbc->{NV}; ++$j) {
+        my $cpt = "CPT$j";
+        for(my $i=0; $i<=$#{$cnbc->{Prior}}; ++$i) {
+            my $ccl = "C$i";
+            for(my $k=0; $k<$cnbc->{$cpt}->{D}; ++$k) {
+                if (${$cnbc->{$cpt}->{$ccl}}[$k] == 0) { $hasp0 = 1; }
+                else {
+                    $logv = log(${$cnbc->{$cpt}->{$ccl}}[$k]);
+                    $sumlogs += $logv;
+                    ${$cnbc->{$cpt}->{$ccl}}[$k] = $logv;
+                    if ($logv < $minv) { $minv = $logv; }
+                }
+            }
+        }
+    }
+    $mval = $sumlogs - 1;
+    $tval = ($hasp0) ? -$mval : -$minv;
+    # 2. Second traversal: update 0 probs, offset weights by T
+    for(my $i=0; $i<=$#{$cnbc->{Prior}}; ++$i) {
+        if (${$cnbc->{Prior}}[$i] == 0) {
+            ${$cnbc->{Prior}}[$i] = $mval;
+        }
+        ${$cnbc->{Prior}}[$i] += $tval;
+    }
+    for(my $j=0; $j<$cnbc->{NV}; ++$j) {
+        my $cpt = "CPT$j";
+        for(my $i=0; $i<=$#{$cnbc->{Prior}}; ++$i) {
+            my $ccl = "C$i";
+            for(my $k=0; $k<$cnbc->{$cpt}->{D}; ++$k) {
+                if (${$cnbc->{$cpt}->{$ccl}}[$k] == 0) {
+                    ${$cnbc->{$cpt}->{$ccl}}[$k] = $mval;
+                }
+                ${$cnbc->{$cpt}->{$ccl}}[$k] += $tval;
+            }
+        }
+    }
+    if ($opts->{d}) { warn Data::Dumper->Dump([ $cnbc ], [ qw(cnbc_pw) ]); }
+}
+
+sub reduce_cnbc_xlc()
+{
+    my ($opts, $cnbc, $xlc) = @_;
+    $xlc->{NV} = $cnbc->{NV};
+    $xlc->{W0} = ${$cnbc->{Prior}}[0] - ${$cnbc->{Prior}}[1];
+    $xlc->{NReal} = 0;
+    $xlc->{NCat} = $cnbc->{NV};
+    for(my $j=0; $j<$cnbc->{NV}; ++$j) {
+        my $cpt = "CPT$j";
+        my $cvj = "CVs$j";
+        my ($ccl0, $ccl1) = ('C0', 'C1');
+        push @{$xlc->{CDs}}, $cnbc->{$cpt}->{D};
+        for(my $k=0; $k<$cnbc->{$cpt}->{D}; ++$k) {
+            my $vdiff =
+                ${$cnbc->{$cpt}->{$ccl0}}[$k] - ${$cnbc->{$cpt}->{$ccl1}}[$k];
+            push @{$xlc->{$cvj}}, $vdiff;
+        }
+    }
+}
+
+
+# Format parsing functions
+
+sub read_acc_spec()
+{
+    my ($fname, $acc) = @_;
+
+    die "Must use common parser!!!!\n";
+    
+    open(my $fh, "<$fname") ||
+        die "Unable to open file $fname. " . $f_err_msg;
+    my ($cc, $cv, $pol, $rmode) = (0, 0, 0, 0);
+    while(<$fh>) {
+        chomp;
+        if ($rmode == 0) {
+            m/\s*(\d)\s*$/ || die "Unable to match: $_\n";
+            ($acc->{NC}, $rmode) = ($1, 1);
+        }
+        elsif ($rmode == 1) {
+            m/\s*(\d+)\s*$/ || die "Unable to match: $_\n";
+            ($acc->{NV}, $rmode) = ($1, 2);
+        }
+        elsif ($rmode == 2) {
+            my $class = "C$cc";
+            m/\s*(\-?\d+\.?\d*)\s*$/ || die "Unable to match: $_\n";
+            $acc->{VV}->{$class}->{W0} = $1;
+            $rmode = 3;
+        }
+        elsif ($rmode == 3) {
+            my $class = "C$cc";
+            my $polarity = "P$pol";
+            m/\s*(\-?\d+\.?\d*)\s*$/ || die "Unable to match: $_\n";
+            ${$acc->{VV}->{$class}->{$polarity}}[$cv] = $1;
+            $pol = 1 - $pol;
+            if ($pol == 0) { $cv++; }
+            if ($cv == $acc->{NV}) {
+                ($cc, $cv, $pol) = ($cc+1, 0, 0);
+                if ($cc == $acc->{NC}) { last; }
+                $rmode = 2;
+            }
+        } else { die "Unexpected line in file: $_\n"; }
+    }
+    close($fh);
+}
+
+# Utilities
+
+sub read_opts()
+{
+    my ($opts) = @_;
+    getopts("hdvkf:o:", $opts);
+
+    if ($opts->{h}) {
+        &prt_help();
+    }
+    elsif (!defined($opts->{f})) {
+        die "Usage: $0 [-h] [-d] [-v] [-k] [-o <out-file>] -f <cnbc-file>\n" ;
+    }
+}
+
+sub prt_help()
+{
+    my $tname = &toolname($0);
+    print <<"EOF";
+$tname: Translate CNBC format into XLC format
+Usage:    $tname [-h] [-d] [-v] [-k] [-o <out-file>] -f <cnbc-file>
+     -f <cnbc-file> specification of CNBC file
+     -o <out-file>  output file for exporting XLC format
+     -k             perform consistency checks & exit if error
+     -v             verbose mode
+     -d             debug mode
+     -h             prints this help
+    Author:   joao.marques-silva\@univ-toulouse.fr
+EOF
+    exit();
+}
+
+sub toolname()
+{
+    my ($tname) = @_;
+    $tname =~ m/([\.\_\-a-zA-Z0-9]+)$/;
+    return $1;
+}
+
+
+#------------------------------------------------------------------------------#
+# Auxiliary functions
+#------------------------------------------------------------------------------#
+
+sub resolve_inc() {    # Copy from template kept in UTILS package
+    my ($cref, $pmname) = @_;
+    my @progname_toks = split(/\//, $0);
+    pop @progname_toks;
+    my $progpath = join('/', @progname_toks);
+    my $fullname = $progpath . '/' . $pmname;
+    open(my $fh, "<$fullname") || die "non-existing file: $pmname\n";
+    return $fh;
+}
+
+# jpms
